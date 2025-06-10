@@ -1,0 +1,9 @@
+aiogram 
+aiogram.types 
+aiogram.filters 
+aiogram.fsm.context 
+aiogram.fsm.state 
+aiogram.fsm.storage.memory 
+aiogram.types
+aiohttp
+aiosqlite
