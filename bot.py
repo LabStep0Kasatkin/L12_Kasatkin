@@ -1,72 +1,70 @@
 # bot.py
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import CommandStart
+from aiogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import asyncio
 import requests
-from config import BOT_TOKEN, WEATHER_API_KEY
+from config import BOT_TOKEN, WEATHER_API_KEY, ADMIN_ID
 from database import get_users, init_db, add_or_update_user, get_user
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from config import ADMIN_ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# --- FSM для регистрации ---
 class Registration(StatesGroup):
     gender = State()
     notification_hour = State()
     notification_minute = State()
     notification_freq = State()
 
-# Клавиатура
-def get_main_keyboard(is_admin=False):
+# --- INLINE КНОПКИ ---
+
+def get_main_inline_keyboard(is_admin=False):
     buttons = [
-        [KeyboardButton(text="Узнать погоду")],
-        [KeyboardButton(text="Регистрация")]
+        [InlineKeyboardButton(text="Узнать погоду", callback_data="weather")],
+        [InlineKeyboardButton(text="Регистрация", callback_data="register")]
     ]
     if is_admin:
-        buttons.append([KeyboardButton(text="Пользователи")])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+        buttons.append([InlineKeyboardButton(text="Пользователи", callback_data="users")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# Клавиатура для выбора пола
-gender_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="Мужской"), KeyboardButton(text="Женский")]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=True
-)
+gender_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Мужской", callback_data="gender_male"),
+     InlineKeyboardButton(text="Женский", callback_data="gender_female")]
+])
 
-# Функция для создания клавиатуры с часами (0-23)
 def get_hour_kb():
     buttons = []
     row = []
     for h in range(0, 24):
-        row.append(KeyboardButton(text=str(h)))
+        row.append(InlineKeyboardButton(text=str(h), callback_data=f"hour_{h}"))
         if len(row) == 6:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# Функция для создания клавиатуры с минутами (0-59, шаг 5)
 def get_minute_kb():
     buttons = []
     row = []
     for m in range(0, 60, 5):
-        row.append(KeyboardButton(text=str(m)))
+        row.append(InlineKeyboardButton(text=str(m), callback_data=f"minute_{m}"))
         if len(row) == 6:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
+# --- СМАЙЛИКИ ПОГОДЫ ---
 def get_weather_smile(temp_c):
     if temp_c < 0:
         return "❄️"
@@ -77,24 +75,45 @@ def get_weather_smile(temp_c):
     else:
         return "🔥"
 
-@dp.message(CommandStart())
-async def start(message: Message):
-    is_admin = message.from_user.id == int(ADMIN_ID)
-    await message.answer("Привет! Я бот для определения погоды.", reply_markup=get_main_keyboard(is_admin))
+# --- ОСНОВНЫЕ ХЕНДЛЕРЫ ---
 
-@dp.message(F.text == "Пользователи")
-async def show_users(message: Message):
-    if str(message.from_user.id) != ADMIN_ID:
-        await message.answer("У вас нет доступа к этой команде.")
+@dp.message(F.text)
+async def start(message: Message):
+    await message.delete()  # удаляем текстовые сообщения, если не нужны
+    is_admin = message.from_user.id == int(ADMIN_ID)
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text="Привет! Я бот для определения погоды.",
+        reply_markup=get_main_inline_keyboard(is_admin)
+    )
+
+# --- INLINE HANDLERS ---
+@dp.callback_query(F.data == "weather")
+async def get_weather(callback: CallbackQuery):
+    url = f"https://api.weatherapi.com/v1/current.json?key={WEATHER_API_KEY}&q=Moscow"
+    response = requests.get(url)
+    data = response.json()
+
+    if "error" in data:
+        await callback.answer("Ошибка получения погоды.", show_alert=True)
+        return
+
+    temp_c = data["current"]["temp_c"]
+    emoji = get_weather_smile(temp_c)
+    await callback.message.edit_text(f"{emoji} Температура в Москве: {temp_c}°C", reply_markup=get_main_inline_keyboard())
+
+@dp.callback_query(F.data == "users")
+async def show_users(callback: CallbackQuery):
+    if str(callback.from_user.id) != ADMIN_ID:
+        await callback.answer("У вас нет доступа к этой команде.", show_alert=True)
         return
 
     users = await get_users()
-
+    output = "👥 Список пользователей:\n\n"
     if not users:
-        await message.answer("Нет зарегистрированных пользователей.")
+        await callback.message.edit_text("Нет зарегистрированных пользователей.", reply_markup=get_main_inline_keyboard())
         return
 
-    output = "👥 Список пользователей:\n\n"
     for user in users:
         telegram_id, username, gender, time, freq = user
         output += (
@@ -107,65 +126,45 @@ async def show_users(message: Message):
         )
 
     if len(output) > 4096:
-        for chunk in [output[i:i + 4096] for i in range(0, len(output), 4096)]:
-            await message.answer(chunk)
+        parts = [output[i:i + 4096] for i in range(0, len(output), 4096)]
+        await callback.message.edit_text(parts[0])
+        for part in parts[1:]:
+            await bot.send_message(callback.message.chat.id, part)
     else:
-        await message.answer(output)
+        await callback.message.edit_text(output, reply_markup=get_main_inline_keyboard())
 
-@dp.message(F.text == "Узнать погоду")
-async def get_weather(message: Message):
-    url = f"https://api.weatherapi.com/v1/current.json?key={WEATHER_API_KEY}&q=Moscow"
+    await callback.answer()
 
-    response = requests.get(url)
-    data = response.json()
-
-    if "error" in data:
-        await message.answer("Ошибка получения погоды.")
-        return
-
-    temp_c = data["current"]["temp_c"]
-    emoji = get_weather_smile(temp_c)
-    await message.answer(f"{emoji} Температура в Москве: {temp_c}°C")
-
-@dp.message(F.text == "Регистрация")
-async def registration_start(message: Message, state: FSMContext):
+@dp.callback_query(F.data == "register")
+async def registration_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(Registration.gender)
-    await message.answer("Выберите ваш пол:", reply_markup=gender_kb)
+    await callback.message.edit_text("Выберите ваш пол:", reply_markup=gender_kb)
 
-
-@dp.message(Registration.gender)
-async def registration_gender(message: Message, state: FSMContext):
-    gender = message.text
-    if gender not in ["Мужской", "Женский"]:
-        await message.answer("Пожалуйста, выберите пол с помощью кнопок.")
-        return
+# --- ГЕНДЕР --- 
+@dp.callback_query(F.data.startswith("gender_"))
+async def registration_gender(callback: CallbackQuery, state: FSMContext):
+    gender = "Мужской" if callback.data == "gender_male" else "Женский"
     await state.update_data(gender=gender)
     await state.set_state(Registration.notification_hour)
-    await message.answer("Выберите час уведомления:", reply_markup=get_hour_kb())
+    await callback.message.edit_text("Выберите час уведомления:", reply_markup=get_hour_kb())
 
-
-@dp.message(Registration.notification_hour)
-async def registration_hour(message: Message, state: FSMContext):
-    hour = message.text
-    if not hour.isdigit() or not (0 <= int(hour) <= 23):
-        await message.answer("Пожалуйста, выберите час с помощью кнопок.")
-        return
+# --- ЧАС ---
+@dp.callback_query(F.data.startswith("hour_"))
+async def registration_hour(callback: CallbackQuery, state: FSMContext):
+    hour = callback.data.split("_")[1]
     await state.update_data(notification_hour=hour)
     await state.set_state(Registration.notification_minute)
-    await message.answer("Выберите минуты уведомления:", reply_markup=get_minute_kb())
+    await callback.message.edit_text("Выберите минуты уведомления:", reply_markup=get_minute_kb())
 
-
-@dp.message(Registration.notification_minute)
-async def registration_minute(message: Message, state: FSMContext):
-    minute = message.text
-    if not minute.isdigit() or not (0 <= int(minute) <= 59) or int(minute) % 5 != 0:
-        await message.answer("Пожалуйста, выберите минуты с помощью кнопок.")
-        return
+# --- МИНУТЫ ---
+@dp.callback_query(F.data.startswith("minute_"))
+async def registration_minute(callback: CallbackQuery, state: FSMContext):
+    minute = callback.data.split("_")[1]
     await state.update_data(notification_minute=minute)
     await state.set_state(Registration.notification_freq)
-    await message.answer("Введите частоту уведомлений (например, ежедневно или еженедельно):", reply_markup=ReplyKeyboardRemove())
+    await callback.message.edit_text("Введите частоту уведомлений (например, ежедневно или еженедельно):")
 
-
+# --- ЧАСТОТА ---
 @dp.message(Registration.notification_freq)
 async def registration_notification_freq(message: Message, state: FSMContext):
     freq = message.text
@@ -178,8 +177,15 @@ async def registration_notification_freq(message: Message, state: FSMContext):
         "notification_freq": freq
     }
     await add_or_update_user(**user_data)
-    await message.answer("Вы успешно зарегистрированы!", reply_markup=get_main_keyboard())
+    await message.delete()
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text="Вы успешно зарегистрированы!",
+        reply_markup=get_main_inline_keyboard()
+    )
     await state.clear()
+
+# --- MAIN ---
 async def main():
     await init_db()
     await dp.start_polling(bot)
